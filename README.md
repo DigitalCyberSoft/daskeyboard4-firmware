@@ -89,15 +89,24 @@ bring it back. **Unplug the keyboard, wait a few seconds, and plug it back in.**
 long as flash was never erased, it boots the existing firmware normally. Confirm with
 `python3 dk4.py status`.
 
-## Getting a correct image
+## Firmware images (not hosted here)
 
-There is no automatic download; `flash` writes a local file you supply. The only image
-Das Keyboard publishes for this board is `L1947V33.bin` (board model 1947, 32 KB),
-inside `USB_FD2_PC.zip`. Firmware is model-specific: run `status` to see your board's
-model, and if it is not 1947 that image does not fit. Request the image for your
-model from Das Keyboard support rather than flashing anything else. Flashing a
-wrong-model image is the primary way to brick the board; the gates above are designed
-to prevent it, but they are not a substitute for having the right file.
+This repository does not host Das Keyboard's firmware or updater binaries. It links to
+the official source so you can download them yourself and decide whether to use them:
+
+- **Windows updater + model-1947 image** (`USB_FD2_PC.zip`, which contains `L1947V33.bin`
+  and the `USB_FD2.abc` updater): <https://download.daskeyboard.com/firmware-releases/DK4PRO/USB_FD2_PC.zip>
+- **macOS updater + model-2175 images** (`DK4Mac FW app.zip`, containing `L2175V16.bin`,
+  `A2175V13.bin`, and `HYKBUtility.app`): linked from the Das Keyboard support article
+  *"Das Keyboard 4 Professional For Mac - How To Update Firmware"* (helpdesk article 261541).
+
+See [`images/SOURCES.md`](images/SOURCES.md) for full provenance and direct links, and
+[`images/SHA256SUMS`](images/SHA256SUMS) to verify whatever you download.
+
+Firmware is model-specific: run `python3 dk4.py status` to see your board's model.
+`L1947V33.bin` fits model 1947 only. If your board reports a different model, that image
+will not fit it and there is no published image for it; request the correct one from Das
+Keyboard support. Flashing a wrong-model image is the primary way to brick the board.
 
 ## Project status
 
