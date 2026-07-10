@@ -1,0 +1,7 @@
+# Grant non-root access to the Das Keyboard 4 hidraw interfaces.
+# VID 0x24F0 (Metadot), PID 0x204A. Members of the 'wheel' group get read/write.
+# Install:
+#   sudo cp 70-daskeyboard.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload
+#   sudo udevadm trigger --subsystem-match=hidraw
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="24f0", ATTRS{idProduct}=="204a", GROUP="wheel", MODE="0660"

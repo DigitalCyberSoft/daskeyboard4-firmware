@@ -1,0 +1,10 @@
+# Proprietary Das Keyboard firmware images and vendor updater.
+# These are Das Keyboard's copyrighted binaries and MUST NOT be redistributed.
+# Obtain them from the official source documented in images/SOURCES.md.
+images/*.bin
+images/*.exe
+images/*.zip
+
+# Python
+__pycache__/
+*.pyc
