@@ -18,6 +18,7 @@ Subcommands:
   ==================================================================
 """
 import sys, os, glob, re, time, fcntl, argparse, hashlib
+import urllib.request, zipfile, io
 
 VID, PID = 0x24F0, 0x204A
 ISP_VIDS = (0x24F0, 0x0A34, 0x0F39)          # runtime + inferred bootloader identities
@@ -30,6 +31,53 @@ CMD_ENTER_ISP, CMD_ENTER_LDROM   = 0xA0, 0xAA
 CMD_CHECK_PROFILE, CMD_ERASE     = 0xA5, 0xA4
 CMD_WRITE_FLASH                  = 0xA1
 CMD_PROTECT, CMD_RESET           = 0xA8, 0xAF
+
+# Upstream firmware sources, keyed by board model (the digits in the version string).
+# The tool DOWNLOADS these from Das Keyboard on demand and verifies sha256; it does NOT
+# bundle or redistribute them. Add an entry when a model's official source URL is known.
+FIRMWARE_SOURCES = {
+    1947: {"url": "https://download.daskeyboard.com/firmware-releases/DK4PRO/USB_FD2_PC.zip",
+           "member": "L1947V33.bin",
+           "sha256": "2746e17bb497ca4be7730ff631ec251c2968f0f4836bb26bbaa415c889980934",
+           "note": "Windows package, public download server"},
+    2175: {"url": "https://daskeyboard.mojohelpdesk.com/api/v4/helpdesk_files/blobs/5957943/download",
+           "member": "L2175V16.bin",
+           "sha256": "cc0b5efbc9acfd3c39204574519e514c785a9cbcc68a730211635351ed34b45a",
+           "note": "macOS package, support helpdesk attachment"},
+}
+
+def _sha256_bytes(b):
+    return hashlib.sha256(b).hexdigest()
+
+def _sha256_file(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+def fetch_image(model, cache_dir):
+    """Download the model's firmware archive from the vendor, extract + verify the .bin.
+    Returns (path, 'cached'|'downloaded'). Verifies sha256; raises on mismatch."""
+    src = FIRMWARE_SOURCES.get(model)
+    if not src:
+        raise DeviceError(f"no known download source for model {model}")
+    os.makedirs(cache_dir, exist_ok=True)
+    dest = os.path.join(cache_dir, src["member"])
+    if os.path.exists(dest) and _sha256_file(dest) == src["sha256"]:
+        return dest, "cached"
+    req = urllib.request.Request(src["url"], headers={"User-Agent": "dk4.py"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        blob = r.read()
+    zf = zipfile.ZipFile(io.BytesIO(blob))
+    member = next((n for n in zf.namelist()
+                   if not n.startswith("__MACOSX") and os.path.basename(n) == src["member"]), None)
+    if member is None:
+        raise DeviceError(f"{src['member']} not found in archive downloaded from {src['url']}")
+    data = zf.read(member)
+    got = _sha256_bytes(data)
+    if got != src["sha256"]:
+        raise DeviceError(f"sha256 mismatch for {src['member']}: got {got}, expected {src['sha256']}")
+    with open(dest, "wb") as f:
+        f.write(data)
+    return dest, "downloaded"
 
 VER_RE = re.compile(r"^([A-Za-z]+)(\d+)V(\d+)$")          # e.g. S3075V10
 FILE_RE = re.compile(r"^([A-Za-z]+)(\d+)V(\d+)\.bin$", re.I)  # e.g. L1947V33.bin
@@ -269,18 +317,58 @@ def cmd_status(args):
               f"{im.size:>8}  {'LDROM' if im.ldrom else 'APROM':<5} "
               f"{'ok' if im.valid else 'BAD':<5} {comp}")
 
+    print("\nDOWNLOAD SOURCES (fetched from the vendor on demand, not bundled): model(s) "
+          + ", ".join(str(m) for m in sorted(FIRMWARE_SOURCES)))
     if dev_model is not None:
         matches = [im for im in imgs if compatible(dev_model, im) and im.valid]
+        have_src = dev_model in FIRMWARE_SOURCES
         print()
         if matches:
-            print(f"VERDICT: {len(matches)} compatible image(s) for model {dev_model}: "
+            print(f"VERDICT: {len(matches)} compatible local image(s) for model {dev_model}: "
                   + ", ".join(im.name for im in matches))
+        elif have_src:
+            print(f"VERDICT: no local image, but model {dev_model} is downloadable. "
+                  f"Run `python3 dk4.py fetch`.")
         else:
-            print(f"VERDICT: 0 compatible images. This board is model {dev_model}; "
-                  f"available images are model(s) "
-                  + ", ".join(sorted({str(im.file_model) for im in imgs})) + ".")
-            print("         No correct image is present. Do not flash; obtain the "
-                  f"model-{dev_model} firmware from Das Keyboard support.")
+            print(f"VERDICT: 0 compatible images and NO download source for model {dev_model} "
+                  f"(this board). Known coverage is model(s) "
+                  + ", ".join(sorted({str(m) for m in FIRMWARE_SOURCES} |
+                                     {str(im.file_model) for im in imgs if im.file_model})) + ".")
+            print(f"         Obtain model-{dev_model} firmware from Das Keyboard support; "
+                  f"do not flash a wrong-model image.")
+    return 0
+
+
+# -------------------------------------------------------------------------- fetch
+def cmd_fetch(args):
+    model = args.model
+    if model is None:
+        node = find_node(args.dev)
+        if not node:
+            print("ERROR: no device found and --model not given.", file=sys.stderr); return 2
+        try:
+            _, parsed = read_device(node)
+        except PermissionError:
+            print(f"ERROR: permission denied on {node}; install 70-daskeyboard.rules or use sudo.",
+                  file=sys.stderr); return 13
+        if not parsed:
+            print("ERROR: could not read/parse the firmware version to determine the model.",
+                  file=sys.stderr); return 1
+        model = parsed[1]
+        print(f"[dev ] board model {model} (firmware {parsed[0]}{parsed[1]}V{parsed[2]})")
+    if model not in FIRMWARE_SOURCES:
+        print(f"No known download source for model {model}. Known sources: model(s) "
+              + ", ".join(str(m) for m in sorted(FIRMWARE_SOURCES))
+              + f". Request model-{model} firmware from Das Keyboard support.", file=sys.stderr)
+        return 3
+    src = FIRMWARE_SOURCES[model]
+    print(f"[fetch] model {model}: {src['member']} from {src['url']}  ({src['note']})")
+    try:
+        path, how = fetch_image(model, args.cache_dir)
+    except (DeviceError, OSError, zipfile.BadZipFile) as e:
+        print(f"ERROR: {e}", file=sys.stderr); return 1
+    print(f"[ok ] {how}: {path}\n       sha256 verified {src['sha256']}")
+    print(f"\nTo flash it (guarded): python3 dk4.py flash {path}")
     return 0
 
 
@@ -386,9 +474,13 @@ def main():
     ap = argparse.ArgumentParser(description="Das Keyboard 4 firmware tool.")
     here = os.path.dirname(os.path.abspath(__file__))
     ap.add_argument("--images-dir", default=os.path.join(here, "images"))
+    ap.add_argument("--cache-dir", default=os.path.expanduser("~/.cache/dk4-firmware"),
+                    help="where fetched firmware is stored")
     ap.add_argument("--dev", help="hidraw node (default: auto-detect)")
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("status", help="read-only: device + image compatibility (default)")
+    pd = sub.add_parser("fetch", help="download+verify this board's firmware from the vendor")
+    pd.add_argument("--model", type=int, help="board model (default: detect from device)")
     pf = sub.add_parser("flash", help="write firmware (guarded)")
     pf.add_argument("image")
     pf.add_argument("--force", action="store_true", help="skip interactive confirmation")
@@ -398,6 +490,8 @@ def main():
 
     if args.cmd == "flash":
         return cmd_flash(args)
+    if args.cmd == "fetch":
+        return cmd_fetch(args)
     return cmd_status(args)   # default
 
 if __name__ == "__main__":

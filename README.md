@@ -56,7 +56,8 @@ Adjust the group in the rule file if your distribution does not use `wheel`.
 ## Usage
 
 ```sh
-python3 dk4.py                    # status: device version + image compatibility (read-only)
+python3 dk4.py                    # status: device + image compatibility (read-only)
+python3 dk4.py fetch              # download this board's firmware from the vendor (verified)
 python3 dk4.py flash IMAGE.bin    # guarded write; see the safety model below
 ```
 
@@ -107,6 +108,30 @@ Firmware is model-specific: run `python3 dk4.py status` to see your board's mode
 `L1947V33.bin` fits model 1947 only. If your board reports a different model, that image
 will not fit it and there is no published image for it; request the correct one from Das
 Keyboard support. Flashing a wrong-model image is the primary way to brick the board.
+
+## Fetching firmware automatically
+
+`dk4.py fetch` downloads the correct image for your board from Das Keyboard's own
+server, extracts it, and verifies its SHA-256 before saving to `~/.cache/dk4-firmware/`.
+Nothing is bundled or redistributed by this repository; your machine fetches directly
+from the vendor, which is just automating the download link.
+
+```sh
+python3 dk4.py fetch                 # detect the board model and fetch its image
+python3 dk4.py fetch --model 1947    # or fetch a specific model
+python3 dk4.py flash ~/.cache/dk4-firmware/L1947V33.bin
+```
+
+Download sources are known for model **1947** (Windows package) and model **2175**
+(macOS package). If your board is a model with no published source (run `status` to
+check), `fetch` says so and points you to Das Keyboard support.
+
+## Scope
+
+This tool targets the **Das Keyboard 4 Professional** (USB `24f0:204a`), which uses the
+"HY" ISP bootloader reversed in `PROTOCOL.md`. The Q-series boards (5Q, 5QS, X50Q) are
+different products updated through the Das Keyboard Q software, not this protocol, and
+are deliberately out of scope. Do not point this tool at a non-DK4 board.
 
 ## Project status
 
