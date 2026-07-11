@@ -57,6 +57,7 @@ Adjust the group in the rule file if your distribution does not use `wheel`.
 
 ```sh
 python3 dk4.py                    # status: device + image compatibility (read-only)
+python3 dk4.py list               # catalog known firmware (flashable here vs Q-series reference)
 python3 dk4.py fetch              # download this board's firmware from the vendor (verified)
 python3 dk4.py flash IMAGE.bin    # guarded write; see the safety model below
 ```
@@ -126,12 +127,27 @@ Download sources are known for model **1947** (Windows package) and model **2175
 (macOS package). If your board is a model with no published source (run `status` to
 check), `fetch` says so and points you to Das Keyboard support.
 
+## Q-series firmware (reference only)
+
+The 5-series and X50Q are a different product family (e.g. the 5Q is USB PID `2020`),
+updated through the Das Keyboard Q software or a self-contained Windows `firmware.exe`.
+They do **not** use the HY bootloader this tool flashes, so `flash`/`fetch` do not and
+must not touch them. `dk4.py list` catalogs them for reference with their official URLs:
+
+- **5Q**: 7.4.51 (latest), 7.4.48, 7.4.18 &nbsp;(~5 MB `.exe`, confirmed on the download server)
+- **X50Q**: 64.0.0
+- **5QS / 5QS Mark IIe**: listed in the changelog; updated via the Q software
+- **4Q**: 24.31.0, 21.27.0 (Q software)
+
+Base URL: `https://download.daskeyboard.com/q-software-releases/Firmware-releases/<MODEL>/<VERSION>/firmware.exe`.
+Flashing a Q-series board from Linux would require reverse-engineering its (different)
+update protocol, which this project has not done.
+
 ## Scope
 
-This tool targets the **Das Keyboard 4 Professional** (USB `24f0:204a`), which uses the
-"HY" ISP bootloader reversed in `PROTOCOL.md`. The Q-series boards (5Q, 5QS, X50Q) are
-different products updated through the Das Keyboard Q software, not this protocol, and
-are deliberately out of scope. Do not point this tool at a non-DK4 board.
+This tool **flashes** only the **Das Keyboard 4 Professional** (USB `24f0:204a`), which
+uses the "HY" ISP bootloader reversed in `PROTOCOL.md`. Q-series boards are cataloged for
+reference (above) but are not flashable here. Do not point `flash` at a non-DK4 board.
 
 ## Project status
 

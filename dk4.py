@@ -46,6 +46,24 @@ FIRMWARE_SOURCES = {
            "note": "macOS package, support helpdesk attachment"},
 }
 
+# Q-series firmware: a DIFFERENT product family (e.g. 5Q is USB PID 0x2020) updated via
+# the Das Keyboard Q software / a self-contained Windows updater .exe. These do NOT use
+# the HY bootloader this tool flashes. Catalogued for reference only; `flash`/`fetch`
+# never touch them. Flash a Q-series board with the official Q software, not this tool.
+REF_BASE = "https://download.daskeyboard.com/q-software-releases/Firmware-releases"
+REFERENCE_FIRMWARE = {
+    "5Q":           {"versions": ["7.4.51", "7.4.48", "7.4.18"], "kind": ".exe (~5 MB)",
+                     "note": "server-confirmed: 5Q/<ver>/firmware.exe"},
+    "X50Q":         {"versions": ["64.0.0"], "kind": ".exe",
+                     "note": "server-confirmed: X50Q/<ver>/firmware.exe"},
+    "5QS":          {"versions": ["28.31.0", "24.31.0"], "kind": "via Q software",
+                     "note": "changelog-listed; standalone download not located"},
+    "5QS Mark IIe": {"versions": ["34.17.0"], "kind": "via Q software",
+                     "note": "changelog-listed; standalone download not located"},
+    "4Q":           {"versions": ["24.31.0", "21.27.0"], "kind": ".exe",
+                     "note": "per official firmware page: DK4Q/<ver>/<profile>/firmware.exe"},
+}
+
 def _sha256_bytes(b):
     return hashlib.sha256(b).hexdigest()
 
@@ -339,6 +357,21 @@ def cmd_status(args):
     return 0
 
 
+# -------------------------------------------------------------------------- list
+def cmd_list(args):
+    print("FLASHABLE by this tool  (DK4 Professional, HY bootloader, raw .bin):")
+    for model in sorted(FIRMWARE_SOURCES):
+        s = FIRMWARE_SOURCES[model]
+        print(f"  model {model:<5} {s['member']:<13} {s['note']}")
+        print(f"              {s['url']}")
+    print("\nREFERENCE ONLY  (Q-series: different product + update protocol; NOT flashable here):")
+    for name, r in REFERENCE_FIRMWARE.items():
+        print(f"  {name:<14} {', '.join(r['versions']):<26} [{r['kind']}]  {r['note']}")
+    print(f"\n  Q-series base URL: {REF_BASE}/<MODEL>/<VERSION>/firmware.exe")
+    print("  Update a Q-series board with the Das Keyboard Q software / Windows updater, not this tool.")
+    return 0
+
+
 # -------------------------------------------------------------------------- fetch
 def cmd_fetch(args):
     model = args.model
@@ -479,6 +512,7 @@ def main():
     ap.add_argument("--dev", help="hidraw node (default: auto-detect)")
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("status", help="read-only: device + image compatibility (default)")
+    sub.add_parser("list", help="list known firmware: flashable here vs Q-series reference")
     pd = sub.add_parser("fetch", help="download+verify this board's firmware from the vendor")
     pd.add_argument("--model", type=int, help="board model (default: detect from device)")
     pf = sub.add_parser("flash", help="write firmware (guarded)")
@@ -492,6 +526,8 @@ def main():
         return cmd_flash(args)
     if args.cmd == "fetch":
         return cmd_fetch(args)
+    if args.cmd == "list":
+        return cmd_list(args)
     return cmd_status(args)   # default
 
 if __name__ == "__main__":
