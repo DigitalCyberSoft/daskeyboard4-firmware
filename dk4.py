@@ -163,6 +163,26 @@ def recv_response(fd, timeout=2.0, wire_len=WIRE_LEN):
 class DeviceError(RuntimeError):
     pass
 
+class ProfileError(DeviceError):
+    """checkProfile returned a non-zero status: the board rejected the image's profile.
+    Carries the device's response payload, which may name the board's own profile."""
+    def __init__(self, status, payload):
+        self.status, self.payload = status, payload
+        super().__init__(f"checkProfile rejected: status {status:#04x}")
+
+def _printable(b):
+    return "".join(chr(c) if 32 <= c < 127 else "." for c in b)
+
+def _profile_name(payload):
+    """Best-effort decode of the ASCII profile code the bootloader returns (e.g. GF/GL/CL),
+    per the Windows tool: first char G=Global / C=Chinese, second F=Full / L=Lite."""
+    s = _printable(payload)
+    for i in range(len(s) - 1):
+        a, b = s[i], s[i + 1]
+        if a in "GC" and b in "FL":
+            return {"G": "Global", "C": "Chinese"}[a] + " " + {"F": "Full", "L": "Lite"}[b]
+    return None
+
 def _cmd(fd, cmd, contents=b"", timeout=2.0, name="", wire_len=WIRE_LEN):
     send_command(fd, cmd, contents, wire_len)
     status, payload = recv_response(fd, timeout, wire_len)
@@ -181,7 +201,11 @@ def enter_isp(fd, ldrom=False):
     return model, filesize
 
 def check_profile(fd, profile10, wire_len=WIRE_LEN):
-    _cmd(fd, CMD_CHECK_PROFILE, bytes(profile10), name="check_profile", wire_len=wire_len)
+    send_command(fd, CMD_CHECK_PROFILE, bytes(profile10), wire_len)
+    status, payload = recv_response(fd, 2.0, wire_len)
+    if status != 0:
+        raise ProfileError(status, payload)          # keep the payload: it may name the board's profile
+    return payload
 def erase_chip(fd, wire_len=WIRE_LEN):
     _cmd(fd, CMD_ERASE, timeout=20.0, name="erase_chip", wire_len=wire_len)
 def protect_chip(fd, wire_len=WIRE_LEN):
@@ -563,6 +587,19 @@ def cmd_flash(args):
         print("[2/6] checkProfile ...")
         try:
             isp_cmd(st, lambda f, wl: check_profile(f, img.profile, wire_len=wl))
+        except ProfileError as e:
+            print(f"ERROR: checkProfile REJECTED by the device (status {e.status:#04x}): this image "
+                  f"is for the wrong profile/region for this board.", file=sys.stderr)
+            print(f"       image profile sent : {img.profile.hex(' ')}", file=sys.stderr)
+            if e.payload:
+                print(f"       device response    : {e.payload.hex(' ')}  ascii={_printable(e.payload)!r}",
+                      file=sys.stderr)
+                name = _profile_name(e.payload)
+                if name:
+                    print(f"       board profile looks like: {name}", file=sys.stderr)
+            else:
+                print("       device returned no payload (reject status only).", file=sys.stderr)
+            reset_kb(st[0], st[2]); return 9
         except DeviceError as e:
             print(f"ERROR: {e}; profile rejected. Aborting before erase.", file=sys.stderr)
             reset_kb(st[0], st[2]); return 9
