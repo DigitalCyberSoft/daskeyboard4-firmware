@@ -20,7 +20,7 @@ Subcommands:
   board; there is no read-back/backup command in the protocol. `status` is safe.
   ==================================================================
 """
-import sys, os, glob, re, time, fcntl, argparse, hashlib, textwrap
+import sys, os, glob, re, time, fcntl, argparse, hashlib, textwrap, errno
 import urllib.request, zipfile, io
 
 VID, PID = 0x24F0, 0x204A
@@ -284,6 +284,24 @@ def reopen_after_isp(old_fd, wait=8.0, settle=SETTLE):
         time.sleep(0.3)
     raise DeviceError("device did not reappear after enterISP (bootloader not found)")
 
+_VANISHED = (errno.ENODEV, errno.ENOENT)          # board re-enumerated: current handle is stale
+
+def isp_cmd(state, func, tries=6):
+    """Run func(fd, wire_len) on the live ISP handle in state=[fd, node, wire_len].
+    If the board re-enumerated (ENODEV/ENOENT), reopen and retry on the fresh handle,
+    updating state in place. A device error (status != 0), a stall, or exhausting the
+    retries all propagate - nothing is swallowed."""
+    last = None
+    for _ in range(tries):
+        try:
+            return func(state[0], state[2])
+        except OSError as e:
+            if e.errno not in _VANISHED:
+                raise
+            last = e
+            state[0], state[1], state[2] = reopen_after_isp(state[0])
+    raise last
+
 
 # -------------------------------------------------------------------------- image model
 def parse_version(s):
@@ -529,47 +547,47 @@ def cmd_flash(args):
     if not confirm(img, node, dev_ver, args.force):
         return 4
 
-    fd = os.open(node, os.O_RDWR)
+    st = [os.open(node, os.O_RDWR), node, WIRE_LEN]     # [fd, node, wire_len]; reopen/isp_cmd update it
     stage = "open"
     try:
         print("\n[1/6] enterISP ...")
-        model, _ = enter_isp(fd, ldrom=img.ldrom)
+        model, _ = enter_isp(st[0], ldrom=img.ldrom)
         stage = "enterISP"
-        fd, node, wl = reopen_after_isp(fd)
-        print(f"      bootloader at {node}; model={model}; feature report {wl}B")
+        st[0], st[1], st[2] = reopen_after_isp(st[0])
+        print(f"      bootloader at {st[1]}; model={model}; feature report {st[2]}B")
         if model is not None and model != img.expected_model:
             print(f"ERROR: device expects model {model} ({model}*1024) but image is {img.size} "
                   f"bytes (model {img.expected_model}). Aborting before erase.", file=sys.stderr)
-            reset_kb(fd, wl); return 7
+            reset_kb(st[0], st[2]); return 7
         time.sleep(SETTLE)
         print("[2/6] checkProfile ...")
         try:
-            check_profile(fd, img.profile, wire_len=wl)
+            isp_cmd(st, lambda f, wl: check_profile(f, img.profile, wire_len=wl))
         except DeviceError as e:
             print(f"ERROR: {e}; profile rejected. Aborting before erase.", file=sys.stderr)
-            reset_kb(fd, wl); return 9
+            reset_kb(st[0], st[2]); return 9
         stage = "checkProfile"
         if args.stop_after_checkprofile:
             print("\nPROBE OK: enterISP + checkProfile both succeeded; stopping before erase "
                   "(nothing was written). Power-cycle if the keyboard is unresponsive.")
-            reset_kb(fd, wl); return 0
+            reset_kb(st[0], st[2]); return 0
         time.sleep(SETTLE)
         print("[3/6] eraseChip ... (do not unplug)")
-        erase_chip(fd, wire_len=wl); stage = "eraseChip"
+        isp_cmd(st, lambda f, wl: erase_chip(f, wire_len=wl)); stage = "eraseChip"
         nz = list(img.blocks())
         print(f"[4/6] writeFlash: {len(nz)} blocks ...")
         stage = "writeFlash"
         for n, (addr, blk) in enumerate(nz, 1):
-            write_flash(fd, addr, blk, wire_len=wl)
+            isp_cmd(st, lambda f, wl, a=addr, b=blk: write_flash(f, a, b, wire_len=wl))
             if n % 64 == 0 or n == len(nz):
                 print(f"        {n}/{len(nz)}", end="\r")
         print()
         time.sleep(SETTLE)
         print("[5/6] protectChip ...")
-        protect_chip(fd, wire_len=wl); stage = "protectChip"
+        isp_cmd(st, lambda f, wl: protect_chip(f, wire_len=wl)); stage = "protectChip"
         time.sleep(SETTLE)
         print("[6/6] resetKB ...")
-        reset_kb(fd, wl)
+        reset_kb(st[0], st[2])
         print("\nDONE. Re-run `dk4.py status` to confirm the new version.")
         return 0
     except (OSError, TimeoutError, DeviceError) as e:
@@ -582,7 +600,7 @@ def cmd_flash(args):
                   "WRITTEN and the board may not boot until a correct image is flashed.",
                   file=sys.stderr)
         try:
-            reset_kb(fd)
+            reset_kb(st[0], st[2])
         except Exception:
             pass
         print("If the keyboard is unresponsive, unplug and replug it (USB power-cycle), "
@@ -590,7 +608,7 @@ def cmd_flash(args):
         return 8
     finally:
         try:
-            os.close(fd)
+            os.close(st[0])
         except OSError:
             pass
 
