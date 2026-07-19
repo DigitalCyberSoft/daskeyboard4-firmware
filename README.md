@@ -38,7 +38,6 @@ only the get-version query and never writes. Run it as often as you like.
 | `PROTOCOL.md` | The reverse-engineered HID/ISP protocol. |
 | `images/` | Firmware images, with `SOURCES.md` (provenance) and `SHA256SUMS`. |
 | `70-daskeyboard.rules` | udev rule for non-root access to the device. |
-| `dk4_read.py`, `dk4_flash.py` | Earlier single-purpose tools, superseded by `dk4.py` (kept for reference). |
 
 ## Setup: non-root access
 
@@ -70,8 +69,11 @@ python3 dk4.py flash IMAGE.bin    # guarded write; see the safety model below
 Before it changes anything on the device (all read-only, no writes):
 
 1. Validates the image signature and size; refuses a malformed image.
-2. Reads the running firmware and compares board models. If the image is for a
-   different model than your board, it **refuses here, before entering ISP**.
+2. Reads the running firmware and compares board models. If the image's filename
+   model number differs from your board's, it **warns loudly that this may be the
+   wrong file** (a brick risk) but does not refuse: the filename model is only a
+   heuristic, and a correct image (e.g. one support sends for your board) can carry
+   a different number. The authoritative model check is the size gate in step 4.
 3. Prints a brick-risk warning and requires you to type the image filename to proceed.
 
 Then, with an abort-and-recover path up to the point of no return:

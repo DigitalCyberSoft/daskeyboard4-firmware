@@ -72,7 +72,7 @@ use millisecond delays.)
 
 ## Open risks before any flash
 
-- Report-id framing differs macOS vs Linux (handled in `dk4_read.py`); confirm live.
+- Report-id framing differs macOS vs Linux (handled in `dk4.py`); confirm live.
 - ISP-mode re-enumeration VID/PID is **inferred**, not observed.
 - `checkProfile` is a guard, not a guarantee; PC vs Mac images share the profile blob,
   so it will not stop a Mac image from flashing a PC board. Wrong image = brick risk.

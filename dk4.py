@@ -8,16 +8,19 @@ Subcommands:
   status  (default)  read-only: identify the keyboard, read its firmware version,
                      scan the images/ dir, and print which images are COMPATIBLE.
                      Sends only the get-version query (0xB0). Never writes.
-  flash <image>      guarded write path. Refuses an incompatible image BEFORE
-                     entering ISP, then warns + requires typed confirmation, then
-                     runs enterISP -> checkProfile -> erase -> write -> protect -> reset.
+  flash <image>      guarded write path. Validates the image and WARNS if its
+                     model number differs from the board (not a refusal: the
+                     filename model is only a heuristic), requires typed
+                     confirmation, then runs enterISP -> size + profile backstops
+                     -> erase -> write -> protect -> reset. Bad-signature images
+                     are still refused.
 
   ==================================================================
   `flash` ERASES and reprograms flash. A wrong or interrupted write BRICKS the
   board; there is no read-back/backup command in the protocol. `status` is safe.
   ==================================================================
 """
-import sys, os, glob, re, time, fcntl, argparse, hashlib
+import sys, os, glob, re, time, fcntl, argparse, hashlib, textwrap
 import urllib.request, zipfile, io
 
 VID, PID = 0x24F0, 0x204A
@@ -287,8 +290,10 @@ class Image:
 def images_in(directory):
     return [Image(p) for p in sorted(glob.glob(os.path.join(directory, "*.bin")))]
 
-def compatible(device_model, img):
-    """Read-only compatibility: board-model digits from the device match the image's."""
+def model_matches(device_model, img):
+    """Heuristic only: the filename's model digits equal the board's reported model.
+    NOT authoritative - a correct image can carry a different number (the size and
+    profile gates at flash time are the real check)."""
     return device_model is not None and img.file_model == device_model
 
 
@@ -327,33 +332,36 @@ def cmd_status(args):
         print("  no Das Keyboard vendor interface found")
 
     print(f"\nIMAGES in {args.images_dir}/  ({len(imgs)} found)")
-    hdr = f"  {'file':<16}{'model':>6}{'ver':>5}{'size':>8}  {'kind':<5} {'sig':<5} compatible"
+    hdr = f"  {'file':<16}{'model':>6}{'ver':>5}{'size':>8}  {'kind':<5} {'sig':<5} model?"
     print(hdr); print("  " + "-" * (len(hdr) - 2))
     for im in imgs:
-        comp = "-" if dev_model is None else ("YES" if compatible(dev_model, im) else "no")
+        comp = "-" if dev_model is None else ("match" if model_matches(dev_model, im) else "differ")
         print(f"  {im.name:<16}{str(im.file_model):>6}{('V'+str(im.file_version)) if im.file_version is not None else '?':>5}"
               f"{im.size:>8}  {'LDROM' if im.ldrom else 'APROM':<5} "
               f"{'ok' if im.valid else 'BAD':<5} {comp}")
+    print("  (\"model?\" = filename model vs board model: a heuristic, NOT the authoritative")
+    print("   check. Size and profile are verified at flash time; see `flash`.)")
 
     print("\nDOWNLOAD SOURCES (fetched from the vendor on demand, not bundled): model(s) "
           + ", ".join(str(m) for m in sorted(FIRMWARE_SOURCES)))
     if dev_model is not None:
-        matches = [im for im in imgs if compatible(dev_model, im) and im.valid]
+        matches = [im for im in imgs if model_matches(dev_model, im) and im.valid]
         have_src = dev_model in FIRMWARE_SOURCES
         print()
         if matches:
-            print(f"VERDICT: {len(matches)} compatible local image(s) for model {dev_model}: "
-                  + ", ".join(im.name for im in matches))
+            print(f"VERDICT: {len(matches)} local image(s) whose model matches this board "
+                  f"({dev_model}): " + ", ".join(im.name for im in matches))
         elif have_src:
             print(f"VERDICT: no local image, but model {dev_model} is downloadable. "
                   f"Run `python3 dk4.py fetch`.")
         else:
-            print(f"VERDICT: 0 compatible images and NO download source for model {dev_model} "
-                  f"(this board). Known coverage is model(s) "
-                  + ", ".join(sorted({str(m) for m in FIRMWARE_SOURCES} |
-                                     {str(im.file_model) for im in imgs if im.file_model})) + ".")
-            print(f"         Obtain model-{dev_model} firmware from Das Keyboard support; "
-                  f"do not flash a wrong-model image.")
+            print(f"VERDICT: no local image and no download source whose filename model "
+                  f"matches this board (model {dev_model}).")
+            print(f"         Filename model is only a heuristic: a correct image (e.g. one")
+            print(f"         Das Keyboard support sends for your board) may carry a different")
+            print(f"         number but the right SIZE. `dk4.py flash <image>` warns on a")
+            print(f"         model difference yet still proceeds, enforcing the authoritative")
+            print(f"         size + profile checks at flash time.")
     return 0
 
 
@@ -407,19 +415,31 @@ def cmd_fetch(args):
 
 # -------------------------------------------------------------------------- flash
 def flash_precheck(dev_parsed, img):
-    """Read-only gate. Returns (ok, reason). No device writes, no ISP."""
+    """Read-only gate, no device writes. Returns (hard_ok, hard_reason, warnings).
+    Only a structurally invalid image is a HARD refusal. A model-number mismatch is
+    a WARNING, not a refusal: the filename model number is not a reliable match test
+    (a correct image can carry a different number). The authoritative checks are the
+    size and profile gates enforced after enterISP, in cmd_flash."""
     if not img.valid:
-        return False, f"image failed signature validation: {'; '.join(img.errors)}"
+        return False, f"image failed signature validation: {'; '.join(img.errors)}", []
+    warnings = []
     if img.file_model is None:
-        return False, f"cannot parse a board model from filename {img.name!r}"
-    if dev_parsed is None:
-        return False, "device firmware version not read / unrecognised; cannot confirm compatibility"
-    dev_model = dev_parsed[1]
-    if img.file_model != dev_model:
-        return False, (f"INCOMPATIBLE: board is model {dev_model} "
-                       f"(reports {dev_parsed[0]}{dev_model}V{dev_parsed[2]}) but image is model "
-                       f"{img.file_model} ({img.name}). Refusing before enterISP.")
-    return True, "ok"
+        warnings.append(f"Could not read a model number from the filename {img.name!r}, "
+                        f"so it cannot be checked against your board.")
+    elif dev_parsed is None:
+        warnings.append("Could not read the board's firmware version, so the image cannot "
+                        "be checked against your board before flashing.")
+    elif img.file_model != dev_parsed[1]:
+        warnings.append(
+            f"Image model {img.file_model} does not match your board's reported model "
+            f"{dev_parsed[1]} (firmware {dev_parsed[0]}{dev_parsed[1]}V{dev_parsed[2]}). "
+            f"The filename model number is only a heuristic - a correct image can carry a "
+            f"different number - so this is not a refusal, but flashing a genuinely wrong "
+            f"image can BRICK the keyboard. Proceed only if you trust where this file came "
+            f"from (for example, Das Keyboard support sent it for your specific board). The "
+            f"size and profile checks after enterISP will try to catch a wrong image, but "
+            f"they are not a guarantee.")
+    return True, "ok", warnings
 
 def confirm(img, node, cur_version, assume_yes):
     print("\n" + "=" * 70)
@@ -455,12 +475,16 @@ def cmd_flash(args):
               file=sys.stderr)
         return 13
 
-    ok, reason = flash_precheck(dev_parsed, img)
-    if not ok and not (args.allow_mismatch and "INCOMPATIBLE" in reason):
+    ok, reason, warnings = flash_precheck(dev_parsed, img)
+    if not ok:
         print(f"REFUSED: {reason}", file=sys.stderr)
         return 5
-    if not ok:
-        print(f"[--allow-mismatch] overriding read-only gate: {reason}", file=sys.stderr)
+    for w in warnings:
+        print("\n" + "!" * 70)
+        print("  WARNING - THIS MAY BE THE WRONG FILE:")
+        for line in textwrap.wrap(w, 66):
+            print("  " + line)
+        print("!" * 70)
 
     if not confirm(img, node, dev_ver, args.force):
         return 4
@@ -518,8 +542,6 @@ def main():
     pf = sub.add_parser("flash", help="write firmware (guarded)")
     pf.add_argument("image")
     pf.add_argument("--force", action="store_true", help="skip interactive confirmation")
-    pf.add_argument("--allow-mismatch", action="store_true",
-                    help="override the read-only model-mismatch refusal (still hits the ISP backstop)")
     args = ap.parse_args()
 
     if args.cmd == "flash":

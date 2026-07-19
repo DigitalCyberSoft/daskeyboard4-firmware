@@ -32,4 +32,4 @@ Confirmed by direct probing on 2026-07-10:
 - `A2175V13.bin` carries the `7B 6A 6B CA FA` signature at offset `0xFF4` that the
   flasher uses to recognise a loader image.
 - Which SKU **your** board is (PC `204A` vs Mac variant) is resolved by reading the
-  running version with `dk4_read.py`, not by the USB id alone.
+  running version with `dk4.py status`, not by the USB id alone.
