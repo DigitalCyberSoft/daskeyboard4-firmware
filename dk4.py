@@ -28,6 +28,7 @@ ISP_VIDS = (0x24F0, 0x0A34, 0x0F39)          # runtime + inferred bootloader ide
 REPORT_ID, WIRE_LEN = 1, 8
 DATA_LEN = WIRE_LEN - 1                        # 7 payload bytes / feature report
 HDR_REQ, HDR_RESP = 0xEA, 0xED
+SETTLE = 0.3                                   # post-command settle delay (the Windows tool uses 300 ms)
 
 CMD_GET_VER_RUN, CMD_GET_VER_ISP = 0xB0, 0xA6
 CMD_ENTER_ISP, CMD_ENTER_LDROM   = 0xA0, 0xAA
@@ -118,20 +119,29 @@ def _packet(cmd, contents=b""):
     pkt.append(chk)
     return bytes(pkt)
 
-def _fragments(pkt):
-    return [bytes([REPORT_ID]) + pkt[i:i + DATA_LEN].ljust(DATA_LEN, b"\0")
-            for i in range(0, len(pkt), DATA_LEN)]
+def _fragments(pkt, wire_len=WIRE_LEN):
+    data_len = wire_len - 1
+    return [bytes([REPORT_ID]) + pkt[i:i + data_len].ljust(data_len, b"\0")
+            for i in range(0, len(pkt), data_len)]
 
-def send_command(fd, cmd, contents=b""):
-    for rep in _fragments(_packet(cmd, contents)):
-        fcntl.ioctl(fd, HIDIOCSFEATURE(len(rep)), bytearray(rep))
+def send_command(fd, cmd, contents=b"", wire_len=WIRE_LEN):
+    for rep in _fragments(_packet(cmd, contents), wire_len):
+        for attempt in range(3):                       # tolerate a transient endpoint stall
+            try:
+                fcntl.ioctl(fd, HIDIOCSFEATURE(len(rep)), bytearray(rep)); break
+            except OSError:
+                if attempt == 2: raise
+                time.sleep(0.02)
 
-def recv_response(fd, timeout=2.0):
+def recv_response(fd, timeout=2.0, wire_len=WIRE_LEN):
     stream, id_off, rl = bytearray(), None, None
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        buf = bytearray(WIRE_LEN); buf[0] = REPORT_ID
-        n = fcntl.ioctl(fd, HIDIOCGFEATURE(WIRE_LEN), buf)
+        buf = bytearray(wire_len); buf[0] = REPORT_ID
+        try:
+            n = fcntl.ioctl(fd, HIDIOCGFEATURE(wire_len), buf)
+        except OSError:
+            time.sleep(0.02); continue                 # transient stall (e.g. EPIPE): retry until timeout
         data = bytes(buf[:n]) if n > 0 else bytes(buf)
         if id_off is None:
             if len(data) >= 2 and data[0] == REPORT_ID and data[1] == HDR_RESP:
@@ -153,9 +163,9 @@ def recv_response(fd, timeout=2.0):
 class DeviceError(RuntimeError):
     pass
 
-def _cmd(fd, cmd, contents=b"", timeout=2.0, name=""):
-    send_command(fd, cmd, contents)
-    status, payload = recv_response(fd, timeout)
+def _cmd(fd, cmd, contents=b"", timeout=2.0, name="", wire_len=WIRE_LEN):
+    send_command(fd, cmd, contents, wire_len)
+    status, payload = recv_response(fd, timeout, wire_len)
     if status != 0:
         raise DeviceError(f"{name or hex(cmd)} returned status {status:#04x}")
     return payload
@@ -170,22 +180,29 @@ def enter_isp(fd, ldrom=False):
     filesize = (p[1] | (p[2] << 8)) if len(p) >= 3 else None
     return model, filesize
 
-def check_profile(fd, profile10): _cmd(fd, CMD_CHECK_PROFILE, bytes(profile10), name="check_profile")
-def erase_chip(fd):               _cmd(fd, CMD_ERASE, timeout=20.0, name="erase_chip")
-def protect_chip(fd):             _cmd(fd, CMD_PROTECT, name="protect_chip")
-def write_flash(fd, addr, block16):
+def check_profile(fd, profile10, wire_len=WIRE_LEN):
+    _cmd(fd, CMD_CHECK_PROFILE, bytes(profile10), name="check_profile", wire_len=wire_len)
+def erase_chip(fd, wire_len=WIRE_LEN):
+    _cmd(fd, CMD_ERASE, timeout=20.0, name="erase_chip", wire_len=wire_len)
+def protect_chip(fd, wire_len=WIRE_LEN):
+    _cmd(fd, CMD_PROTECT, name="protect_chip", wire_len=wire_len)
+def write_flash(fd, addr, block16, wire_len=WIRE_LEN):
     _cmd(fd, CMD_WRITE_FLASH, bytes([(addr >> 8) & 0xFF, addr & 0xFF]) + bytes(block16),
-         name=f"write_flash@{addr:#06x}")
-def reset_kb(fd):
+         name=f"write_flash@{addr:#06x}", wire_len=wire_len)
+def reset_kb(fd, wire_len=WIRE_LEN):
     try:
-        _cmd(fd, CMD_RESET, timeout=1.0, name="reset_kb")
+        _cmd(fd, CMD_RESET, timeout=1.0, name="reset_kb", wire_len=wire_len)
     except (TimeoutError, OSError):
         pass
 
 
 # -------------------------------------------------------------------------- discovery
-def _has_vendor_feature(desc):
+def vendor_feature_wire_len(desc):
+    """Wire byte length of the Feature report in the UsagePage-1/Usage-0x80 vendor
+    collection (data bytes + 1 report-id byte), or None if absent. The ISP bootloader
+    may expose a different length than runtime, so this is re-read after enterISP."""
     i, up, usages, top, depth = 0, None, [], None, 0
+    rsize = rcount = rid = 0
     while i < len(desc):
         b = desc[i]; i += 1
         if b == 0xFE:
@@ -196,9 +213,14 @@ def _has_vendor_feature(desc):
         for k in range(bsize):
             val |= desc[i + k] << (8 * k)
         i += bsize
-        if btype == 1 and btag == 0: up = val
-        elif btype == 2 and btag == 0: usages.append(val)
-        elif btype == 0:
+        if btype == 1:                                 # Global
+            if btag == 0: up = val
+            elif btag == 0x7: rsize = val
+            elif btag == 0x8: rid = val
+            elif btag == 0x9: rcount = val
+        elif btype == 2 and btag == 0:                 # Local Usage
+            usages.append(val)
+        elif btype == 0:                               # Main
             if btag == 0xA:
                 if depth == 0: top = (up, usages[0] if usages else None)
                 depth += 1; usages = []
@@ -206,9 +228,21 @@ def _has_vendor_feature(desc):
                 depth -= 1; usages = []
                 if depth == 0: top = None
             else:
-                if btag == 0xB and top == (1, 0x80): return True
+                if btag == 0xB and top == (1, 0x80):   # Feature item in the vendor collection
+                    return (rsize * rcount + 7) // 8 + (1 if rid else 0)
                 usages = []
-    return False
+    return None
+
+def _has_vendor_feature(desc):
+    return vendor_feature_wire_len(desc) is not None
+
+def _node_feature_len(node, default=WIRE_LEN):
+    p = "/sys/class/hidraw/" + os.path.basename(node) + "/device/report_descriptor"
+    try:
+        with open(p, "rb") as f:
+            return vendor_feature_wire_len(f.read()) or default
+    except OSError:
+        return default
 
 def find_node(explicit=None):
     if explicit:
@@ -228,7 +262,10 @@ def find_node(explicit=None):
             return node
     return None
 
-def reopen_after_isp(old_fd, wait=8.0):
+def reopen_after_isp(old_fd, wait=8.0, settle=SETTLE):
+    """Reopen the device after enterISP re-enumerates it. Returns (fd, node, wire_len).
+    Re-reads the feature-report length from the (possibly different) bootloader descriptor
+    and settles before the caller issues the next command, mirroring the Windows tool."""
     try:
         os.close(old_fd)
     except OSError:
@@ -238,9 +275,12 @@ def reopen_after_isp(old_fd, wait=8.0):
         node = find_node()
         if node:
             try:
-                return os.open(node, os.O_RDWR), node
+                fd = os.open(node, os.O_RDWR)
             except OSError:
-                pass
+                time.sleep(0.3); continue
+            wire_len = _node_feature_len(node)
+            time.sleep(settle)                          # let the bootloader settle before the first command
+            return fd, node, wire_len
         time.sleep(0.3)
     raise DeviceError("device did not reappear after enterISP (bootloader not found)")
 
@@ -490,36 +530,64 @@ def cmd_flash(args):
         return 4
 
     fd = os.open(node, os.O_RDWR)
+    stage = "open"
     try:
         print("\n[1/6] enterISP ...")
         model, _ = enter_isp(fd, ldrom=img.ldrom)
-        fd, node = reopen_after_isp(fd)
-        print(f"      bootloader at {node}; device reports model={model}")
+        stage = "enterISP"
+        fd, node, wl = reopen_after_isp(fd)
+        print(f"      bootloader at {node}; model={model}; feature report {wl}B")
         if model is not None and model != img.expected_model:
             print(f"ERROR: device expects model {model} ({model}*1024) but image is {img.size} "
                   f"bytes (model {img.expected_model}). Aborting before erase.", file=sys.stderr)
-            reset_kb(fd); return 7
+            reset_kb(fd, wl); return 7
+        time.sleep(SETTLE)
         print("[2/6] checkProfile ...")
         try:
-            check_profile(fd, img.profile)
+            check_profile(fd, img.profile, wire_len=wl)
         except DeviceError as e:
             print(f"ERROR: {e}; profile rejected. Aborting before erase.", file=sys.stderr)
-            reset_kb(fd); return 9
+            reset_kb(fd, wl); return 9
+        stage = "checkProfile"
+        if args.stop_after_checkprofile:
+            print("\nPROBE OK: enterISP + checkProfile both succeeded; stopping before erase "
+                  "(nothing was written). Power-cycle if the keyboard is unresponsive.")
+            reset_kb(fd, wl); return 0
+        time.sleep(SETTLE)
         print("[3/6] eraseChip ... (do not unplug)")
-        erase_chip(fd)
+        erase_chip(fd, wire_len=wl); stage = "eraseChip"
         nz = list(img.blocks())
         print(f"[4/6] writeFlash: {len(nz)} blocks ...")
+        stage = "writeFlash"
         for n, (addr, blk) in enumerate(nz, 1):
-            write_flash(fd, addr, blk)
+            write_flash(fd, addr, blk, wire_len=wl)
             if n % 64 == 0 or n == len(nz):
                 print(f"        {n}/{len(nz)}", end="\r")
         print()
+        time.sleep(SETTLE)
         print("[5/6] protectChip ...")
-        protect_chip(fd)
+        protect_chip(fd, wire_len=wl); stage = "protectChip"
+        time.sleep(SETTLE)
         print("[6/6] resetKB ...")
-        reset_kb(fd)
+        reset_kb(fd, wl)
         print("\nDONE. Re-run `dk4.py status` to confirm the new version.")
         return 0
+    except (OSError, TimeoutError, DeviceError) as e:
+        before_erase = stage in ("open", "enterISP", "checkProfile")
+        print(f"\nERROR: flash aborted during {stage}: {type(e).__name__}: {e}", file=sys.stderr)
+        if before_erase:
+            print("No eraseChip/writeFlash ran: the firmware is INTACT.", file=sys.stderr)
+        else:
+            print("WARNING: this happened at or after eraseChip; the flash may be PARTIALLY "
+                  "WRITTEN and the board may not boot until a correct image is flashed.",
+                  file=sys.stderr)
+        try:
+            reset_kb(fd)
+        except Exception:
+            pass
+        print("If the keyboard is unresponsive, unplug and replug it (USB power-cycle), "
+              "then run `python3 dk4.py status`.", file=sys.stderr)
+        return 8
     finally:
         try:
             os.close(fd)
@@ -542,6 +610,9 @@ def main():
     pf = sub.add_parser("flash", help="write firmware (guarded)")
     pf.add_argument("image")
     pf.add_argument("--force", action="store_true", help="skip interactive confirmation")
+    pf.add_argument("--stop-after-checkprofile", action="store_true",
+                    help="PROBE: enter ISP and run up to checkProfile, then stop before "
+                         "erasing/writing (never modifies flash; still enters the bootloader)")
     args = ap.parse_args()
 
     if args.cmd == "flash":
