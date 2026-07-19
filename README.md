@@ -4,7 +4,8 @@ Read and (optionally) flash firmware on the Das Keyboard 4 Professional
 (Metadot USB `24f0:204a`) from Linux, where no official updater exists. Das Keyboard
 ships updaters only for Windows (`USB_FD2.abc`, a renamed `.exe`) and macOS
 (`HYKBUtility.app`). This project reconstructs their USB protocol by static analysis
-of the macOS app so the same operations can run on Linux. The recovered protocol is
+of **both** vendor tools — the macOS app and the Windows PE — so the same operations
+can run on Linux. The two agree byte-for-byte on the wire; the recovered protocol is
 documented in `PROTOCOL.md`.
 
 ## ⚠️ Read this before using it
@@ -12,10 +13,13 @@ documented in `PROTOCOL.md`.
 > **Prefer the official Windows or macOS updater. Use this only as a last resort.**
 >
 > This tool is **unofficial**, **not supported by Das Keyboard**, and reconstructed
-> from a disassembly. The version-read path is confirmed working on real hardware,
-> but **the write/erase path has never been run end to end against a keyboard.**
-> A wrong or interrupted write **bricks the board**, and the protocol has no
-> read-back or backup command, so a bad flash cannot be undone.
+> from a disassembly. What has run on real hardware: the version read, entering the
+> ISP bootloader, reconnecting after the board re-enumerates, and the `checkProfile`
+> compatibility gate. What has **not** run on hardware: the actual **erase and write**
+> (no profile-matching image has been available to test it end to end). A wrong or
+> interrupted write **bricks the board**, and the protocol has no read-back or backup
+> command, so a bad flash cannot be undone. Validate an image with
+> `flash --stop-after-checkprofile` (which stops before erase) before any real write.
 >
 > **You SHOULD NOT run the `flash` command unless ALL of the following hold:**
 >
@@ -55,35 +59,54 @@ Adjust the group in the rule file if your distribution does not use `wheel`.
 ## Usage
 
 ```sh
-python3 dk4.py                    # status: device + image compatibility (read-only)
+python3 dk4.py                    # status: device + image profiles/compatibility (read-only)
 python3 dk4.py list               # catalog known firmware (flashable here vs Q-series reference)
 python3 dk4.py fetch              # download this board's firmware from the vendor (verified)
+python3 dk4.py flash IMAGE.bin --stop-after-checkprofile   # SAFE probe: test an image, stop before erase
 python3 dk4.py flash IMAGE.bin    # guarded write; see the safety model below
 ```
 
-`status` prints your board's model and firmware version, lists the images in
-`images/`, and states which (if any) are compatible with the attached board.
+`status` prints your board's model and firmware version, and lists the images in
+`images/` with each one's decoded **profile tag** and whether its model matches the
+attached board.
 
 ## How `flash` is gated
 
 Before it changes anything on the device (all read-only, no writes):
 
-1. Validates the image signature and size; refuses a malformed image.
+1. Validates the image signature and structure; refuses a malformed image.
 2. Reads the running firmware and compares board models. If the image's filename
    model number differs from your board's, it **warns loudly that this may be the
    wrong file** (a brick risk) but does not refuse: the filename model is only a
    heuristic, and a correct image (e.g. one support sends for your board) can carry
-   a different number. The authoritative model check is the size gate in step 4.
+   a different number. The authoritative checks are the two device-side gates below.
 3. Prints a brick-risk warning and requires you to type the image filename to proceed.
 
-Then, with an abort-and-recover path up to the point of no return:
+Then it enters the bootloader, with a hard abort before the first destructive step:
 
-4. `enterISP`, then re-checks the device's self-reported flash size against the image;
-   aborts if they disagree.
-5. `checkProfile`; aborts if the device rejects the image's region/variant.
-6. `eraseChip` → `writeFlash` (per block) → `protectChip` → `resetKB`.
+4. `enterISP` (the board re-enumerates; the tool reopens it and re-reads its report
+   size), then checks the device's self-reported flash size against the image; aborts
+   if they disagree.
+5. `checkProfile` — the device compares the image's embedded **profile tag** (region +
+   product) against itself and returns accept/reject; a reject aborts before erase.
+   `--stop-after-checkprofile` stops here, so you can safely confirm an image matches
+   your board before committing to a write.
+6. `eraseChip` → `writeFlash` (per block) → `protectChip` → `resetKB`. **Point of no
+   return.**
 
-Steps 1 to 3 are validated. **Steps 4 to 6 are not validated against hardware.**
+Steps 1–5 are exercised on hardware and abort cleanly. **Step 6 (erase/write) has not
+been run on hardware** — no profile-matching image has been available to test it.
+
+## Profiles: why "right model" isn't enough
+
+Each image carries a 10-byte **profile tag** near its end, lightly obfuscated
+(`not(rol(x,4))`). Decoded it reads as `<region><product>` — e.g. `GFD4215` is Global
+Full, product "D4215"; `GFDK4USB2` is Global Full, product "DK4USB2". `dk4.py status`
+decodes and shows this for every image. At flash time `checkProfile` has the **board
+itself** accept or reject the image's tag, so an image can be the right size and still
+be refused because its product tag doesn't match your board. The bootloader does **not**
+report which tag it wants — so if your board rejects every image you have, only Das
+Keyboard can supply the matching one. Give them your label's **Part No.** and **Serial**.
 
 ## If the keyboard gets stuck in "flashing"/bootloader mode
 
@@ -107,10 +130,15 @@ the official source so you can download them yourself and decide whether to use 
 See [`images/SOURCES.md`](images/SOURCES.md) for full provenance and direct links, and
 [`images/SHA256SUMS`](images/SHA256SUMS) to verify whatever you download.
 
-Firmware is model-specific: run `python3 dk4.py status` to see your board's model.
-`L1947V33.bin` fits model 1947 only. If your board reports a different model, that image
-will not fit it and there is no published image for it; request the correct one from Das
-Keyboard support. Flashing a wrong-model image is the primary way to brick the board.
+Firmware is board-specific in two ways the device enforces: **size** (the bootloader
+reports the exact image size it expects) and **profile tag** (region + product, checked
+on the device at `checkProfile`). Run `python3 dk4.py status` to see your board's model
+and each image's profile. The public images fit only their own boards (models 1947 and
+2175); newer boards report a different model and reject the public images at
+`checkProfile`. If none of your images pass, request the correct one from Das Keyboard
+support (give them your label's Part No. and Serial), then confirm it with
+`flash --stop-after-checkprofile` before a real write. Flashing a wrong image is the
+primary way to brick the board.
 
 ## Fetching firmware automatically
 
@@ -153,6 +181,12 @@ reference (above) but are not flashable here. Do not point `flash` at a non-DK4 
 
 ## Project status
 
-- **Read path** (`status`): confirmed on hardware.
-- **Write path** (`flash`): implemented from the disassembly and gated, but not
-  exercised on hardware. Treat it as experimental.
+- **Protocol**: reconstructed from the macOS app and **cross-checked byte-for-byte
+  against the Windows tool** — same framing, same feature-report transport, same
+  command set.
+- **Read path** (`status`, profile decode): confirmed on hardware.
+- **ISP path** (`enterISP`, re-enumeration reconnect, `checkProfile`): confirmed on
+  hardware; `flash --stop-after-checkprofile` exercises it and stops before erase.
+- **Write path** (`eraseChip`/`writeFlash`/`protectChip`/`resetKB`): implemented from
+  the disassembly and gated, but **not yet exercised on hardware** (awaiting a
+  profile-matching image). Treat it as experimental.
