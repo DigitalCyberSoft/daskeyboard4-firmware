@@ -173,15 +173,19 @@ class ProfileError(DeviceError):
 def _printable(b):
     return "".join(chr(c) if 32 <= c < 127 else "." for c in b)
 
-def _profile_name(payload):
-    """Best-effort decode of the ASCII profile code the bootloader returns (e.g. GF/GL/CL),
-    per the Windows tool: first char G=Global / C=Chinese, second F=Full / L=Lite."""
-    s = _printable(payload)
-    for i in range(len(s) - 1):
-        a, b = s[i], s[i + 1]
-        if a in "GC" and b in "FL":
-            return {"G": "Global", "C": "Chinese"}[a] + " " + {"F": "Full", "L": "Lite"}[b]
-    return None
+def _deobfuscate(b):
+    """Undo the vendor's profile obfuscation: not(rotate-left-4) per byte."""
+    return bytes((~(((x << 4) | (x >> 4)) & 0xFF)) & 0xFF for x in bytes(b))
+
+def image_profile(profile10):
+    """Decode a 10-byte checkProfile blob to (region, full_string) the way the Windows tool
+    does (not(rol(x,4))). The de-obfuscated string is '<2-char region><product>'; region
+    GF/GL/CF/CL = Global/Chinese + Full/Lite. checkProfile compares the RAW (obfuscated)
+    blob; this decode is for display only."""
+    s = _deobfuscate(profile10).split(b"\x00")[0].decode("latin-1", "replace")
+    region = {"GF": "Global Full", "GL": "Global Lite",
+              "CF": "Chinese Full", "CL": "Chinese Lite"}.get(s[:2].upper())
+    return region, s
 
 def _cmd(fd, cmd, contents=b"", timeout=2.0, name="", wire_len=WIRE_LEN):
     send_command(fd, cmd, contents, wire_len)
@@ -352,6 +356,7 @@ class Image:
             if not (d[self.size - 0x10] == 0x7B and d[self.size - 0x0F] == 0x6A):
                 self.errors.append("APROM signature 7B 6A missing at [size-0x10]")
         self.profile = d[self.size - 0x0E:self.size - 0x04]
+        self.profile_region, self.profile_str = image_profile(self.profile)
         self.expected_model = self.size // 1024          # device must report this at enterISP
         self.block_count = self.size // 16
         fm = FILE_RE.match(self.name)
@@ -414,15 +419,16 @@ def cmd_status(args):
         print("  no Das Keyboard vendor interface found")
 
     print(f"\nIMAGES in {args.images_dir}/  ({len(imgs)} found)")
-    hdr = f"  {'file':<16}{'model':>6}{'ver':>5}{'size':>8}  {'kind':<5} {'sig':<5} model?"
+    hdr = f"  {'file':<16}{'model':>6}{'ver':>5}{'size':>8}  {'kind':<5} {'sig':<4} {'model?':<7} profile"
     print(hdr); print("  " + "-" * (len(hdr) - 2))
     for im in imgs:
         comp = "-" if dev_model is None else ("match" if model_matches(dev_model, im) else "differ")
+        prof = im.profile_str + (f" ({im.profile_region})" if im.profile_region else "")
         print(f"  {im.name:<16}{str(im.file_model):>6}{('V'+str(im.file_version)) if im.file_version is not None else '?':>5}"
               f"{im.size:>8}  {'LDROM' if im.ldrom else 'APROM':<5} "
-              f"{'ok' if im.valid else 'BAD':<5} {comp}")
-    print("  (\"model?\" = filename model vs board model: a heuristic, NOT the authoritative")
-    print("   check. Size and profile are verified at flash time; see `flash`.)")
+              f"{'ok' if im.valid else 'BAD':<4} {comp:<7} {prof}")
+    print("  (\"model?\" = filename model vs board model, a heuristic. \"profile\" = the image's")
+    print("   embedded region+product tag; the board must accept it at flash time. See `flash`.)")
 
     print("\nDOWNLOAD SOURCES (fetched from the vendor on demand, not bundled): model(s) "
           + ", ".join(str(m) for m in sorted(FIRMWARE_SOURCES)))
@@ -588,17 +594,17 @@ def cmd_flash(args):
         try:
             isp_cmd(st, lambda f, wl: check_profile(f, img.profile, wire_len=wl))
         except ProfileError as e:
-            print(f"ERROR: checkProfile REJECTED by the device (status {e.status:#04x}): this image "
-                  f"is for the wrong profile/region for this board.", file=sys.stderr)
-            print(f"       image profile sent : {img.profile.hex(' ')}", file=sys.stderr)
+            region, pstr = image_profile(img.profile)
+            print(f"ERROR: checkProfile REJECTED by the device (status {e.status:#04x}). The board "
+                  f"does not accept this image's profile.", file=sys.stderr)
+            print(f"       this image is tagged: {pstr!r}" + (f"  ({region})" if region else ""),
+                  file=sys.stderr)
             if e.payload:
-                print(f"       device response    : {e.payload.hex(' ')}  ascii={_printable(e.payload)!r}",
+                print(f"       device response     : {e.payload.hex(' ')}  ascii={_printable(e.payload)!r}",
                       file=sys.stderr)
-                name = _profile_name(e.payload)
-                if name:
-                    print(f"       board profile looks like: {name}", file=sys.stderr)
             else:
-                print("       device returned no payload (reject status only).", file=sys.stderr)
+                print("       the bootloader does not report its own required profile (empty payload); "
+                      "only Das Keyboard knows which tag this board expects.", file=sys.stderr)
             reset_kb(st[0], st[2]); return 9
         except DeviceError as e:
             print(f"ERROR: {e}; profile rejected. Aborting before erase.", file=sys.stderr)
