@@ -1,7 +1,7 @@
-# Proprietary Das Keyboard firmware images and vendor updater.
-# These are Das Keyboard's copyrighted binaries and MUST NOT be redistributed.
-# Obtain them from the official source documented in images/SOURCES.md.
-images/*.bin
+# The Windows updater program (images/*.exe) and vendor archives (images/*.zip)
+# are not redistributed here; get them from the source in images/SOURCES.md.
+# The firmware images (images/*.bin) ARE included: they are the copyrighted work
+# of Heng Yu Technology (HK) Ltd, distributed by Das Keyboard. See images/SOURCES.md.
 images/*.exe
 images/*.zip
 

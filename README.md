@@ -116,27 +116,27 @@ bring it back. **Unplug the keyboard, wait a few seconds, and plug it back in.**
 long as flash was never erased, it boots the existing firmware normally. Confirm with
 `python3 dk4.py status`.
 
-## Firmware images (not hosted here)
+## Firmware images (included here)
 
-This repository does not host Das Keyboard's firmware or updater binaries. It links to
-the official source so you can download them yourself and decide whether to use them:
+The images in `images/` are bundled in this repository for convenience, so the tool has
+something to flash. They are **not this project's work**: they are the copyrighted
+firmware of **Heng Yu Technology (HK) Ltd** ("HY"), distributed under the Das Keyboard
+brand, and each carries an "All rights reserved" notice. They are included unmodified.
+No redistribution license is granted by this repository; all rights remain with the
+copyright holder. See [`images/SOURCES.md`](images/SOURCES.md) for the copyright notice
+and the origin of each file, and [`images/SHA256SUMS`](images/SHA256SUMS) to verify them.
 
-- **Windows updater + model-1947 image** (`USB_FD2_PC.zip`, which contains `L1947V33.bin`
-  and the `USB_FD2.abc` updater): <https://download.daskeyboard.com/firmware-releases/DK4PRO/USB_FD2_PC.zip>
-- **macOS updater + model-2175 images** (`DK4Mac FW app.zip`, containing `L2175V16.bin`,
-  `A2175V13.bin`, and `HYKBUtility.app`): linked from the Das Keyboard support article
-  *"Das Keyboard 4 Professional For Mac - How To Update Firmware"* (helpdesk article 261541).
-
-See [`images/SOURCES.md`](images/SOURCES.md) for full provenance and direct links, and
-[`images/SHA256SUMS`](images/SHA256SUMS) to verify whatever you download.
+The Windows updater program (`USB_FD2.abc`) and the original vendor `.zip`/app bundles
+are **not** included: this Linux tool replaces the updater, and those packages are just
+linked from `SOURCES.md` if you want the originals.
 
 Firmware is board-specific in two ways the device enforces: **size** (the bootloader
 reports the exact image size it expects) and **profile tag** (region + product, checked
 on the device at `checkProfile`). Run `python3 dk4.py status` to see your board's model
-and each image's profile. The public images fit only their own boards (models 1947 and
-2175); newer boards report a different model and reject the public images at
-`checkProfile`. If none of your images pass, request the correct one from Das Keyboard
-support (give them your label's Part No. and Serial), then confirm it with
+and each image's profile. The bundled images fit only their own boards (models 1947 and
+2175, plus the 60 KB `L2689V17.bin`); a board matching none of them rejects them at
+`checkProfile`. If none pass, request the correct image from Das Keyboard support (give
+them your label's Part No. and Serial), then confirm it with
 `flash --stop-after-checkprofile` before a real write. Flashing a wrong image is the
 primary way to brick the board.
 
@@ -144,8 +144,8 @@ primary way to brick the board.
 
 `dk4.py fetch` downloads the correct image for your board from Das Keyboard's own
 server, extracts it, and verifies its SHA-256 before saving to `~/.cache/dk4-firmware/`.
-Nothing is bundled or redistributed by this repository; your machine fetches directly
-from the vendor, which is just automating the download link.
+It fetches directly from the vendor to your machine, automating the official download
+link, useful for a board whose image is not bundled here or to pull a fresh copy.
 
 ```sh
 python3 dk4.py fetch                 # detect the board model and fetch its image

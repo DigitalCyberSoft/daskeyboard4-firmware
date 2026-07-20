@@ -4,6 +4,16 @@ All images that exist for this board, and where each came from. The official
 download server hosts exactly ONE image for the DK4 Professional; the Mac-variant
 images exist only inside a support-ticket attachment.
 
+## Copyright / attribution
+
+These images and the vendor updater are the copyrighted work of **Heng Yu Technology
+(HK) Ltd** ("HY"), distributed under the Das Keyboard brand. The macOS app and the
+Windows updater both carry the notice *"Copyright (c) 2014 Heng Yu Technology (HK)
+Limited. All rights reserved."* The `.bin` files here are included **unmodified** for use
+with this tool; no license to redistribute them is granted by this repository, and all
+rights remain with the copyright holder. The Windows updater program and the original
+vendor archives are **not** included here.
+
 ## Available images
 
 | File | Bytes | SHA-256 (prefix) | Board / role | Source |
@@ -11,6 +21,7 @@ images exist only inside a support-ticket attachment.
 | `L1947V33.bin` | 32768 | `2746e17b…980934` | DK4 **Professional (PC)** main image, version tag **V33** | `https://download.daskeyboard.com/firmware-releases/DK4PRO/USB_FD2_PC.zip` |
 | `L2175V16.bin` | 32768 | `cc0b5efb…d34b45a` | DK4 Professional **for Mac** main image, version tag V16 | mojohelpdesk blob `5957943` (`DK4Mac FW app.zip`), linked from article 261541 |
 | `A2175V13.bin` | 4096  | `8125d499…8953fd` | DK4 Pro for Mac **loader/LDROM** image (V13); flashed via the LDROM ISP path | same Mac zip |
+| `L2689V17.bin` | 61440 | `e9f1e555…9f4679` | 60 KB image; profile tag `GFDK4USB2`; matches this board's size gate but **rejected at `checkProfile`** | community-contributed; not on the vendor's public server; original source unknown |
 | `USB_FD2.abc.exe` | 1719296 | (PE32 i386) | Windows flasher (`USB_FD2.abc` renamed; it is an ordinary .exe) | `USB_FD2_PC.zip` |
 
 Full hashes in `SHA256SUMS`.
